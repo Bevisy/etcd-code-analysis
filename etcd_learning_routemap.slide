@@ -1,0 +1,92 @@
+# etcd learning rodemap
+
+Zhang Binbin
+2021-05-16
+https://bevisy.github.io
+binbin36520{at}gmail.com
+
+## raft 分布式一致性协议
+- CAP 原理
+    - C: Consistency（一致性）
+    - A: Availability（可用性）
+    - P: Tolerance to the partition of network（分区容忍性）
+- Paxos 协议  
+    - “拜占庭将军问题”
+    - 论文： [The PartTime Parliament](http://research.microsoft.com/en-us/um/people/lamport/pubs/lamport-paxos.pdf), [Paxos Made Simple](http://research.microsoft.com/en-us/um/people/lamport/pubs/paxos-simple.pdf), [Revisiting the Paxos Algorithm](http://research.microsoft.com/en-us/um/people/blampson/60-PaxosAlgorithm/Acrobat.pdf)
+- Raft 协议
+    - [raft 官网](https://raft.github.io/)
+    - [raft 论文](https://ramcloud.atlassian.net/wiki/download/attachments/6586375/raft.pdf)
+    - [raft动画演示](http://thesecretlivesofdata.com/raft/)
+
+## etcd 基础知识
+etcd 部署  
+- goreman 快速部署etcd集群
+- kubernetes 生产集群部署
+- etcdctl 常见命令
+- etcd 常用配置参数
+
+## etcd API v2/v3
+- v2 (已过时)
+- v3
+    - gRPC
+    - KV API
+    - watch API
+    - Lease API
+
+## etcd 集群运维
+- 升级
+- 参数调优
+- 监控
+- 快照和备份
+- 灾难恢复
+- 故障恢复
+
+## etcd 安全
+- 访问安全
+    - 用户认证
+    - 用户授权
+- 传输安全
+    - TLS/SSL加密传输
+
+## etcd 源码分析
+核心模块：  
+- 用于与集群中其他 etcd 节点通信的 etcd-raft
+- 用于与客户端交互和底层 raft 模块通信的 etcd-server
+- 用于存储日志的 etcd-WAL和SNAPSHOT
+- 用于持久化用户数据的 etcd-storage
+    - MVCC
+    - [bboltDB](https://pkg.go.dev/go.etcd.io/bbolt)
+- 用于与客户端交互的 etcd-client
+- 用于模块通信之间的网络协议
+
+## etcd 请求流程图
+![image](./image/etcd-arch.png)
+
+## 流程图分析
+etcd 写入数据到某个etcd server(假设为leader)：  
+请求流程划分为了以下几个子步骤：
+    1.1：etcd server 收到客户端请求。  
+    1.2：etcd server 将请求发送给本模块的 raft.go，这里负责与 etcd raft 模块进行通信。  
+    1.3：raft.go 将数据封装成 raft 日志的形式提交给 raft 模块。  
+    1.4：raft 模块会首先保存到 raftLog 的 unstable 存储部分。  
+    1.5：raft 模块通过 raft 协议与集群中其他 etcd 节点进行交互。  
+应答步骤如下：  
+    2.1 ：集群中其他节点向 leader 节点应答接收这条数据库。  
+    2.2：当 leader 节点收到超过半数以上应答接收这条日志数据的节点时，etcd raft 通过 Ready 结构体通知 etcd server 中的 raft 该日志数据已经 commit。  
+    2.3：raft.go 收到 Ready 数据时，首先将这条日志写到 WAL 模块中。  
+    2.4：通知最上层的 etcd server 该日志已经 commit。  
+    2.5：etcd server 调用 applierV3 模块将日志写入持久化存储中。  
+    2.6：etcd server 应答客户端该数据写入成功。  
+    2.7：etcd server 调用 etcd raft，修改其 raftLog 模块的数据，将这条日志写入 raftLog storage 中。  
+
+## 总结
+1. etcd raft 模块在应答某条日志数据已经 commit 之后，是首先写入到 WAL 模块中的，因为这个模块只是添加一条日志，所以速度很快。即使在后面 applierV3 写入失败，重启的时候也可以根据 WAL 模块中的日志数据进行恢复。  
+2. etcd raft 中的 raftLog 数据是保存到内存的，重启即失效，上层应用真实的数据是持久化保存到 WAL 和 applierV3 中的。
+
+## etcd storage
+
+
+## etcd 常见问题
+1. 集群时间不同步，导致节点频繁选举
+2. 节点IO延迟，导致etcd集群异常
+3. 网络带宽限制，导致etcd集群异常
