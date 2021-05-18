@@ -84,6 +84,10 @@ etcd 写入数据到某个etcd server(假设为leader)：
 2. etcd raft 中的 raftLog 数据是保存到内存的，重启即失效，上层应用真实的数据是持久化保存到 WAL 和 applierV3 中的。
 
 ## etcd storage
+常见并发控制方式：
+- 悲观并发控制
+- 乐观并发控制
+- 多版本并发控制
 
 
 ## etcd 常见问题
