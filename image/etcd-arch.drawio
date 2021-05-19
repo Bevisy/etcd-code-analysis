@@ -1,6 +1,6 @@
 <mxfile>
     <diagram id="xTqoJF0-lNSNfUjLk2Er" name="第 1 页">
-        <mxGraphModel dx="610" dy="485" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+        <mxGraphModel dx="476" dy="487" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -10,10 +10,10 @@
                 <mxCell id="3" value="" style="rounded=0;whiteSpace=wrap;html=1;fontStyle=1" parent="1" vertex="1">
                     <mxGeometry x="40" y="163" width="720" height="180" as="geometry"/>
                 </mxCell>
-                <mxCell id="4" value="etcd server" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+                <mxCell id="4" value="EtcdServer" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
                     <mxGeometry x="160" y="178" width="120" height="60" as="geometry"/>
                 </mxCell>
-                <mxCell id="5" value="raft" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+                <mxCell id="5" value="raft Node" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
                     <mxGeometry x="160" y="268" width="120" height="60" as="geometry"/>
                 </mxCell>
                 <mxCell id="6" value="applierV3&lt;br&gt;(boltdb)" style="whiteSpace=wrap;html=1;rounded=0;" parent="1" vertex="1">

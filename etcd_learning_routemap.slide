@@ -26,7 +26,7 @@ etcd 部署
 - etcd 常用配置参数
 
 ## etcd API v2/v3
-- v2 (已过时)
+- v2 (不做研究)
 - v3
     - gRPC
     - KV API
@@ -54,13 +54,13 @@ etcd 部署
 - 用于与客户端交互和底层 raft 模块通信的 etcd-server
 - 用于存储日志的 etcd-WAL和SNAPSHOT
 - 用于持久化用户数据的 etcd-storage
-    - MVCC
-    - [bboltDB](https://pkg.go.dev/go.etcd.io/bbolt)
+// - MVCC
+// - [bboltDB](https://pkg.go.dev/go.etcd.io/bbolt)
 - 用于与客户端交互的 etcd-client
 - 用于模块通信之间的网络协议
 
 ## etcd 请求流程图
-![image](./image/etcd-arch.png)
+.image ./image/etcd-arch.png
 
 ## 流程图分析
 etcd 写入数据到某个etcd server(假设为leader)：  
@@ -88,9 +88,458 @@ etcd 写入数据到某个etcd server(假设为leader)：
 - 悲观并发控制
 - 乐观并发控制
 - 多版本并发控制
+    - "读多写少"
+    - 每一个写操作都会创建一个新版本的数据，读操作会从有限多个版本的数据中挑选一个最合适的结果直接返回（往往是最新版本）  
+
+[浅谈数据库并发控制-锁和MVCC](https://draveness.me/database-concurrency-control/)
+
+## etcd storage
+.image ./image/etcd-storage-v3.png 752 887
+
+## etcd-storage
+
+// etcd v3 键值对数据结构
+// ```go
+// type KeyValue struct {
+// 	// key is the key in bytes. An empty key is not allowed.
+// 	Key []byte `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+// 	// create_revision is the revision of last creation on this key.
+// 	CreateRevision int64 `protobuf:"varint,2,opt,name=create_revision,json=createRevision,// proto3" json:"create_revision,omitempty"`
+// 	// mod_revision is the revision of last modification on this key.
+// 	ModRevision int64 `protobuf:"varint,3,opt,name=mod_revision,json=modRevision,proto3" // json:"mod_revision,omitempty"`
+// 	// version is the version of the key. A deletion resets
+// 	// the version to zero and any modification of the key
+// 	// increases its version.
+// 	Version int64 `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
+// 	// value is the value held by the key, in bytes.
+// 	Value []byte `protobuf:"bytes,5,opt,name=value,proto3" json:"value,omitempty"`
+// 	// lease is the ID of the lease that attached to key.
+// 	// When the attached lease expires, the key will be deleted.
+// 	// If lease is 0, then no lease is attached to the key.
+// 	Lease int64 `protobuf:"varint,6,opt,name=lease,proto3" json:"lease,omitempty"`
+// }
+// ```
+// KeyValue.CreateRevision 代表 etcd 的某个 key 最后一次创建时 etcd 的 revison, KeyValue .ModRevision 则代 表 etcd 的某个 key最后一次更新时 etcd 的 revison 。 verison 特指 etcd 键空 间某个 key 从创建开始被修改的次数，即 KeyValue.Version 。
+
+## etcd storage
+etcd v3 store 分成两部分：
+- 内存中的kvindex(btree 实现)
+- 后端存储(设计上通过backend可对接多种存储，目前只支持boltdb)
+
+_[B树](https://zh.wikipedia.org/wiki/B%E6%A0%91)（英语：B-tree）是一种自平衡的树，能够保持数据有序。这种数据结构能够让查找数据、顺序访问、插入数据及删除的动作，都在对数时间内完成。B树，概括来说是一个一般化的二叉查找树（binary search tree）一个节点可以拥有2个以上的子节点。与自平衡二叉查找树不同，B树适用于读写相对大的数据块的存储系统，例如磁盘。B树减少定位记录时所经历的中间过程，从而加快存取速度。B树这种数据结构可以用来描述外部存储。这种数据结构常被应用在数据库和文件系统的实现上。_
+
+## etcd-storage
+
+etcd 中的 MVCC 实现
+
+举例说明：  
+```shell
+    etcdctl txn <<<'
+    put k1 "v1"
+    put k2 "v2"
+    '
+    etcdctl txn <<<'
+    put k1 "v12"
+    put k2 "v22"
+    '
+```
+boltdb中其实产生4条数据：
+```shell
+    rev={3 0}, key=k1, value="v1" 
+    rev={3 1}, key=k2, value="v2" 
+    rev={4 0}, key=k1, value="v12" 
+    rev={4 1}, key=k2, value="v22" 
+```
+
+## etcd-storage
+
+revision 主要存在两部分,第一部分 main rev,每操作一次事务就加一，第二部分 sub rev,同一事务中每进行一次操作加一
+```go
+type revision struct {
+	// main is the main revision of a set of changes that happen atomically.
+	main int64
+
+	// sub is the sub revision of a change in a set of changes that happen
+	// atomically. Each change has different increasing sub revision in that
+	// set.
+	sub int64
+}
+```
+- 每个事务都有唯一事务ID，全局递增不重复，即revision的main
+- 一个事务可以包含多个修改操作（ PUT 和 DELETE ），每个修改操作均对应于一个 revision ， 但共享同一个 main
+- 一个事务内连续的多个修改操作都会从 0 开始递增编号，这个编号即 sub
+
+## etcd-storage
+
+```go
+type keyIndex struct {
+	key         []byte
+	modified    revision // the main rev of the last modification
+	generations []generation // 多版本信息
+}
+```
+```go
+type generation struct {
+	ver     int64
+	created revision // when the generation is created (put in first revision).
+	revs    []revision
+}
+```
+举例说明：  
+假设存在一个值为"foo" 的 key:   
+```
+    ki := &keyIndex{key: []byte("foo")}
+``` 
+进行两次修改：
+```  
+    ki.put(zap.NewExample(), 2, 0) // 第一次变更发生在ID为2的事务中，且是第一次操作  
+    ki.put(zap.NewExample(), 4, 2) // 第二次变更发生在ID为4的事务中，且是第三次操作  
+```
+
+## etcd-storage
+
+keyIndex结构为： 
+``` 
+    key: "foo"  
+    modified: {4, 2}  
+    generations:  
+        [{2, 0}, {4, 2}]  
+```
+如果在此后的事务中这个key经历了被删除，再创建的过程：  
+```
+    ki.tombstone(zap.NewExample(), 6, 0)  // 在第6次事务中被删除  
+    ki.put(zap.NewExample(), 8, 0)  
+    ki.put(zap.NewExample(), 10, 0)  
+```
+那它会多一个generation：  
+```
+    key: "foo"  
+    modified: {10, 0}  
+    generations:  
+        [{8, 0}, {10, 0}] 
+        [{2, 0}, {4, 2}, {6, 0}(t)],   
+```
+
+## etcd-storage
+
+MVCC keyIndex
+```shell
+┌───────────────────────────────────────────────────────────────────────────┐
+│              ┌───────────┬───────────┬─────────────┐                      │
+│              │  []byte   │  revision │[]generation │ keyIndex             │
+│              │   key     │  modified │ generations │                      │
+│              └───────────┴──────┬────┴──────┬──────┘                      │
+│            ┌────────────────────┘           │                             │
+│            ▼                                │                             │
+│       revision                              ▼                             │
+│    ┌──────┬───────┐              ┌──────────────┬──────────────┐          │
+│    │ main │  sub  │              │ generation0  │ generation1  │ ****     │
+│    └──────┴───────┘              └───────┬──────┴──────────────┘          │
+│                                          │                                │
+│                                          ▼                                │
+│                       ┌──────┬────────────┬─────────┐                     │
+│                       │ ver  │  created   │  revs   │ generation          │
+│                       └──────┴───────┬────┴────┬────┘                     │
+│                     ┌────────────────┘         │                          │
+│                     ▼                          ▼                          │
+│             ┌──────────────┐   ┌──────────────┬──────────────┐            │
+│             │  revision    │   │  revision    │  revision    │ ****       │
+│             └──────────────┘   └──────────────┴──────────────┘            │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+keyIndex 保存 key 与 revision 之间的映射关系，可用来加速查询。
+
+## etcd-storage
+
+使用treeIndex在内存中存放keyIndex数据信息，结构为btree。
+```go
+type index interface {
+	Get(key []byte, atRev int64) (rev, created revision, ver int64, err error)
+	Range(key, end []byte, atRev int64) ([][]byte, []revision)
+	Revisions(key, end []byte, atRev int64) []revision
+	Put(key []byte, rev revision)
+	Tombstone(key []byte, rev revision) error
+	RangeSince(key, end []byte, rev int64) []revision
+	Compact(rev int64) map[revision]struct{}
+	Keep(rev int64) map[revision]struct{}
+	Equal(b index) bool
+
+	Insert(ki *keyIndex)
+	KeyIndex(ki *keyIndex) *keyIndex
+}
+
+type treeIndex struct {
+	sync.RWMutex
+	tree *btree.BTree
+	lg   *zap.Logger
+}
+```
+
+## etcd-storage
+
+```go
+func (ti *treeIndex) Put(key []byte, rev revision) {
+	keyi := &keyIndex{key: key}
+
+	ti.Lock()
+	defer ti.Unlock()
+	item := ti.tree.Get(keyi)
+	if item == nil {
+		keyi.put(ti.lg, rev.main, rev.sub)
+		ti.tree.ReplaceOrInsert(keyi)
+		return
+	}
+	okeyi := item.(*keyIndex)
+	okeyi.put(ti.lg, rev.main, rev.sub)
+}
+
+func (ti *treeIndex) Get(key []byte, atRev int64) (modified, created revision, ver int64, err error) {
+	keyi := &keyIndex{key: key}
+	ti.RLock()
+	defer ti.RUnlock()
+	if keyi = ti.keyIndex(keyi); keyi == nil {
+		return revision{}, revision{}, 0, ErrRevisionNotFound
+	}
+	return keyi.get(ti.lg, atRev)
+}
+```
+
+## etcd-storage
+
+客户端查询时，先通过内存中的B树在keyIndex.generations[0].revs 中找到最后一条 revision，然后去 BoltDB 中 读取与该 key 对应的最新 value。
+
+kvindex为内存数据，集群重启后，如何创建？  
+启动etcd后会从boltdb中将所有数据加载到内存中，然后会初始化一个新的btree索引，调用restore方法恢复索引。
+```go
+// etcd/mvcc/kvstore.go
+func (s *store) restore() error {
+    ...
+    _, scheduledCompactBytes := tx.UnsafeRange(metaBucketName, scheduledCompactKeyName, nil, 0)
+    ...
+    rkvc, revc := restoreIntoIndex(s.lg, s.kvindex)
+    ...
+        restoreChunk(s.lg, rkvc, keys, vals, keyToLease)
+    ...
+}
+```
 
 
-## etcd 常见问题
-1. 集群时间不同步，导致节点频繁选举
-2. 节点IO延迟，导致etcd集群异常
-3. 网络带宽限制，导致etcd集群异常
+## etcd-storage
+
+boltdb存储的key是revision， value是keyValue JSON序列化后的结构，如下：
+```go
+type KeyValue struct {
+	// key is the key in bytes. An empty key is not allowed.
+	Key []byte `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	// create_revision is the revision of last creation on this key.
+	CreateRevision int64 `protobuf:"varint,2,opt,name=create_revision,json=createRevision,proto3" json:"create_revision,omitempty"`
+	// mod_revision is the revision of last modification on this key.
+	ModRevision int64 `protobuf:"varint,3,opt,name=mod_revision,json=modRevision,proto3" json:"mod_revision,omitempty"`
+	// version is the version of the key. A deletion resets
+	// the version to zero and any modification of the key
+	// increases its version.
+	Version int64 `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
+	// value is the value held by the key, in bytes.
+	Value []byte `protobuf:"bytes,5,opt,name=value,proto3" json:"value,omitempty"`
+	// lease is the ID of the lease that attached to key.
+	// When the attached lease expires, the key will be deleted.
+	// If lease is 0, then no lease is attached to the key.
+	Lease int64 `protobuf:"varint,6,opt,name=lease,proto3" json:"lease,omitempty"`
+}
+```
+
+boltdb 存储扁平化的 mvccpb.KeyValue，可直接通过 revision 获取对应的值。实际实现为一个B+树。
+
+## etcd-storage
+
+完整的代码流程：   
+代码入口接口： `applierV3`  
+```go
+// etcd/etcdserver/apply.go
+type applierV3 interface {
+	Apply(r *pb.InternalRaftRequest) *applyResult
+
+	Put(txn mvcc.TxnWrite, p *pb.PutRequest) (*pb.PutResponse, *traceutil.Trace, error)
+	Range(ctx context.Context, txn mvcc.TxnRead, r *pb.RangeRequest) (*pb.RangeResponse, error)
+	DeleteRange(txn mvcc.TxnWrite, dr *pb.DeleteRangeRequest) (*pb.DeleteRangeResponse, error)
+	Txn(rt *pb.TxnRequest) (*pb.TxnResponse, error)
+	Compaction(compaction *pb.CompactionRequest) (*pb.CompactionResponse, <-chan struct{}, *traceutil.Trace, error)
+
+	LeaseGrant(lc *pb.LeaseGrantRequest) (*pb.LeaseGrantResponse, error)
+	LeaseRevoke(lc *pb.LeaseRevokeRequest) (*pb.LeaseRevokeResponse, error)
+
+	LeaseCheckpoint(lc *pb.LeaseCheckpointRequest) (*pb.LeaseCheckpointResponse, error)
+
+	Alarm(*pb.AlarmRequest) (*pb.AlarmResponse, error)
+
+	Authenticate(r *pb.InternalAuthenticateRequest) (*pb.AuthenticateResponse, error)
+
+	AuthEnable() (*pb.AuthEnableResponse, error)
+	AuthDisable() (*pb.AuthDisableResponse, error)
+
+	UserAdd(ua *pb.AuthUserAddRequest) (*pb.AuthUserAddResponse, error)
+	UserDelete(ua *pb.AuthUserDeleteRequest) (*pb.AuthUserDeleteResponse, error)
+	UserChangePassword(ua *pb.AuthUserChangePasswordRequest) (*pb.AuthUserChangePasswordResponse, error)
+	UserGrantRole(ua *pb.AuthUserGrantRoleRequest) (*pb.AuthUserGrantRoleResponse, error)
+	UserGet(ua *pb.AuthUserGetRequest) (*pb.AuthUserGetResponse, error)
+	UserRevokeRole(ua *pb.AuthUserRevokeRoleRequest) (*pb.AuthUserRevokeRoleResponse, error)
+	RoleAdd(ua *pb.AuthRoleAddRequest) (*pb.AuthRoleAddResponse, error)
+	RoleGrantPermission(ua *pb.AuthRoleGrantPermissionRequest) (*pb.AuthRoleGrantPermissionResponse, error)
+	RoleGet(ua *pb.AuthRoleGetRequest) (*pb.AuthRoleGetResponse, error)
+	RoleRevokePermission(ua *pb.AuthRoleRevokePermissionRequest) (*pb.AuthRoleRevokePermissionResponse, error)
+	RoleDelete(ua *pb.AuthRoleDeleteRequest) (*pb.AuthRoleDeleteResponse, error)
+	UserList(ua *pb.AuthUserListRequest) (*pb.AuthUserListResponse, error)
+	RoleList(ua *pb.AuthRoleListRequest) (*pb.AuthRoleListResponse, error)
+}
+```
+
+## etcd-storage
+
+applierV3backend：基础的applierV3接口实现，内部调用EtcdServer中的KV接口进行持久化数据读写操作。
+```go
+type applierV3backend struct {
+	s *EtcdServer
+
+	checkPut   checkReqFunc
+	checkRange checkReqFunc
+}
+```
+
+## etcd-storage
+
+整个流程分析：etcd server 启动时初始化，创建 backend  
+```shell
+// 起始位置：etcd/etcdserver/server.go: NewServer()
+bepath := cfg.backendPath()
+beExist := fileutil.Exist(bepath)
+be := openBackend(cfg) // 创建
+|- newBackend
+    |- bolt.Open(bcfg.Path, 0600, bopts)
+    |- b := &backend{
+		db: db,
+		batchInterval: bcfg.BatchInterval,
+		batchLimit:    bcfg.BatchLimit ...
+		}
+	 |- b.run() // 定时任务，批量周期进行提交
+	   |- t := time.NewTimer(b.batchInterval)
+	   |- select {
+    		case <-t.C:
+    			b.batchTx.CommitAndStop()
+    			return
+    		}
+    		if b.batchTx.safePending() != 0 {
+    			b.batchTx.Commit()
+    		}
+```
+
+## etcd-storage
+
+基于新建的backend，会在做一层封装：
+```go
+srv.kv = mvcc.New(srv.getLogger(), srv.be, srv.lessor, srv.authStore, &srv.consistIndex,   
+mvcc.StoreConfig{CompactionBatchLimit: cfg.CompactionBatchLimit})
+
+mvcc.New
+|- s := &watchableStore{
+    store:    NewStore(lg, b, le, ig),
+    victimc:  make(chan struct{}, 1),
+    unsynced: newWatcherGroup(),
+    synced:   newWatcherGroup(),
+    }
+|- s.store.ReadView = &readView{s}
+	s.store.WriteView = &writeView{s}
+	if s.le != nil {
+		s.le.SetRangeDeleter(func() lease.TxnDelete { return s.Write() })
+	}    
+|- go s.syncWatchersLoop() // 用于watch机制的异步任务
+|- go s.syncVictimsLoop()
+```
+
+## etcd-storage
+
+目前只关注 `MewStore()` 实现：
+```shell
+mvcc.NewStore
+|- s := &store{
+		b:       b,
+		kvindex: newTreeIndex(lg), // 创建 treeIndex
+		le: le,
+		currentRev:     1, // 最近一次事务的版次
+		compactMainRev: -1,//最近一次事务的主版次
+		bytesBuf8: make([]byte, 8),
+		fifoSched: schedule.NewFIFOScheduler(),
+		stopc: make(chan struct{}),
+	}
+|- s.ReadView = &readView{s}
+	s.WriteView = &writeView{s}
+	if s.le != nil {
+		s.le.SetRangeDeleter(func() lease.TxnDelete { return s.Write() })
+	}
+|- tx.UnsafeCreateBucket(keyBucketName) // 创建bucket-"key"用来存储kv数据，
+|- tx.UnsafeCreateBucket(metaBucketName) //创建Bucket-”meta“用来存储元数据
+|- s.restore() // 恢复存储
+|-    ...
+```
+至此完成 treeIndex 和 boltdb 初始化。
+
+## etcd-storage
+
+最终，etcd又对mvcc.watchableStore进行了一次封装srv.newApplierV3Backend()，其用于衔接存储和raft消息请求。
+
+## 以 写 为例：
+```shell
+applierV3backend.Put
+|- txn = a.s.KV().Write()
+|- txn.Put(p.Key, val, leaseID)
+    |- storeTxnWrite.Put(key, value []byte, lease lease.LeaseID)
+        |- tw.put(key, value, lease)
+            |- rev := tw.beginRev + 1
+                c := rev
+                |- _, created, ver, err := tw.s.kvindex.Get(key, rev) // 如果key存在则获取
+            if err == nil {
+                    c = created.main
+                    oldLease = tw.s.le.GetLease(lease.LeaseItem{Key: string(key)})
+                }
+                |- ibytes := newRevBytes()
+                |- idxRev := revision{main: rev, sub: int64(len(tw.changes))} // 构建 revision
+                |- revToBytes(idxRev, ibytes)
+                |- ver = ver + 1
+```
+
+##
+
+```
+                |- kv := mvccpb.KeyValue{ // 构建 keyValue
+                        Key:            key,
+                        Value:          value,
+                        CreateRevision: c,
+                        ModRevision:    rev,
+                        Version:        ver,
+                        Lease:          int64(leaseID),
+                    }
+                |- d, err := kv.Marshal()
+                |- tw.tx.UnsafeSeqPut(keyBucketName, ibytes, d) // 存储到boltDB中，key为`revision`
+                |- tw.s.kvindex.Put(key, idxRev) // 将key到 revision的映射存储到treeIndex中
+```
+
+## 以 读 为例
+
+```go
+// etcd/etcdserver/apply.go
+applierV3backend.Range
+|- txn = a.s.kv.Read(trace)
+|- txn.Range(r.Key, mkGteRange(r.RangeEnd), ro)
+    |- storeTxnRead.Range(key, end []byte, ro RangeOptions)
+        |- tr.rangeKeys(key, end, tr.Rev(), ro)
+            |- rev := ro.Rev
+            |- revpairs := tr.s.kvindex.Revisions(key, end, rev) // 从内存中获取 []revision
+            |- kvs := make([]mvccpb.KeyValue, limit)
+	        |- revBytes := newRevBytes()
+            |- [for] _, vs := tr.tx.UnsafeRange(keyBucketName, revBytes, nil, 0)
+            |- [for] err := kvs[i].Unmarshal(vs[0]) // 从boltdb中获取 keys
+```
+
+// ## etcd 常见问题
+// 1. 集群时间不同步，导致节点频繁选举
+// 2. 节点IO延迟，导致etcd集群异常
+// 3. 网络带宽限制，导致etcd集群异常
