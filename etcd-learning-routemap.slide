@@ -1,4 +1,4 @@
-# etcd learning rodemap
+# etcd learning routemap
 
 Zhang Binbin
 2021-05-16
@@ -21,17 +21,24 @@ binbin36520{at}gmail.com
 ## etcd 基础知识
 etcd 部署  
 - goreman 快速部署etcd集群
+	- [部署本地集群](https://github.com/etcd-io/etcd/#running-a-local-etcd-cluster)
 - kubernetes 生产集群部署
-- etcdctl 常见命令
+	- 利用kubeadm、kubespray等工具自动部署
+- etcdctl 使用
+	- [Readme](https://github.com/etcd-io/etcd/tree/main/etcdctl#readme)
 - etcd 常用配置参数
+	- [配置文档](https://etcd.io/docs/v3.4/op-guide/configuration/)
 
 ## etcd API v2/v3
 - v2 (不做研究)
 - v3
     - gRPC
     - KV API
+		- KV API 被用来处理储存在 etcd v3 内的键值对
     - watch API
+		- Watch API 提供了 基于事件（ event）的接口，用于异步监测 key 的变化
     - Lease API
+		- 租约 （ Lease ）是一种检测客户端活跃度（ liveness ）的机制
 
 ## etcd 集群运维
 - 升级
