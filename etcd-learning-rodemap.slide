@@ -16,7 +16,7 @@ binbin36520{at}gmail.com
 - Raft 协议
     - [raft 官网](https://raft.github.io/)
     - [raft 论文](https://ramcloud.atlassian.net/wiki/download/attachments/6586375/raft.pdf)
-	- [raft 译文](https://www.infoq.cn/article/raft-paper)
+	- [raft 译文](https://github.com/brandonwang001/raft_translation/blob/master/raft_translation.pdf)
     - [raft动画演示](http://thesecretlivesofdata.com/raft/)
 
 ## etcd 基础知识
