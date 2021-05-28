@@ -79,6 +79,14 @@ $seq-$index.wal
 ```
 这将为您提供元数据、日志中的最后一个raft.State和raft.Entry项的片段。
 
+#### wal doc 总结
+WAL由分段的wal文件组成
+每个WAL文件的头部有一部分数据，是metadata
+使用 w.Save 保存数据
+使用完成之后，使用 w.Close 关闭
+WAL中的每一条记录，都有一个循环冗余校验码（CRC）
+WAL是只能打开来用于读，或者写，但是不能既读又写
+
 ### wal 文件物理格式
 日志项具有多种类型：
 ```go
