@@ -1,4 +1,13 @@
-## WAL struct
+# ETCD 日志和快照管理
+etcd 对数据的持久化采用 binlog （WAL）和加快照（Snapshot）的方式。
+
+etcd 工作时默认生成目录 snap 和 wal。
+- snap 用于存放快照数据。etcd 为防止 WAL 文件过多会创建快照，snap 用于存储 etcd 的快照数据状态。
+- wal 用于存放预写式日志，其最大的作用是记录整个数据变化的全部历程。在 etcd 中，所有数据的修改在提交前，都要先写人 WAL 中。使用 WAL 进行数据的存储使得 etcd 拥有故障快速恢复和数据回滚这两个重要功能。
+
+## WAL
+WAL 管理所有的更新日志，主要处理日志的追加、日志文件的切换、日志的回放等操作 。
+### WAL struct
 ```go
 // WAL is a logical representation of the stable storage.
 // WAL is either in read mode or append mode but not both.
@@ -104,7 +113,7 @@ WAL是只能打开来用于读，或者写，但是不能既读又写
 - padding:  为了保持日志8字节对齐而填充的数据
 
 ### wal 文件初始化
-
+TODO
 
 ### txn 多事务请求
 ```sh
@@ -146,7 +155,7 @@ term         index      type    data
 Entry types () count is : 7%
 ```
 
-### db
+### db 数据
 ```sh
 $ etcd-dump-db list-bucket infra1.etcd               
 alarm
@@ -181,3 +190,6 @@ key="\x00\x00\x00\x00\x00\x00\x00\x03_\x00\x00\x00\x00\x00\x00\x00\x00", value="
 # 初始提交： put foo "bar"
 key="\x00\x00\x00\x00\x00\x00\x00\x02_\x00\x00\x00\x00\x00\x00\x00\x00", value="\n\x03foo\x10\x02\x18\x02 \x01*\x03bar"
 ```
+
+## snapshot
+
