@@ -45,3 +45,5 @@ Leader 节点会记录该只读请求对应的编号作为 readlndex，当 Leade
 Raft 协议为了优化无意义的选举，给节点添加了一个 PreVote 的状态：当某个节点要发起选举之前，需要先进入 PreVote 的状态。在 PreVot巳状态下的节点会先尝试连接集群中的其他节点，如果能够成功连接到半数以上的节点，才能真正切换成 Candidate 状态并发起新一轮的选举。
 
 # etcd-raft 模块
+
+## Config 结构体
