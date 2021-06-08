@@ -47,3 +47,32 @@ Raft 协议为了优化无意义的选举，给节点添加了一个 PreVote 的
 # etcd-raft 模块
 
 ## Config 结构体
+代码路径：etcd/raft/raft.go
+
+Config 包含启动 raft 需要的参数
+
+## Storage 接口
+代码路径：etcd/raft/storage.go
+
+存储当前节点的 Entry 记录；节点快照创建、查询、删除等操作
+
+## unstable 结构体
+代码路径：etcd/raft/log_unstable.go
+除了 Storage 存储 Entry 外，unstable 结构体也会存储 Entry 记录。
+unstable 使用内存数组维护所有的 Entry 记录。对于 Leader 节点而言，它维护了客户端请求对应的 Entry 记录；对于 Follower 节点而言，它维护的是从 Leader 节点复制过来的 Entry 记录。无论是 Leader 节点还是 Follower 节点，对于刚刚接收到的 Entry 记录首先都会被存储在unstable 中。然后按照 Raft 协议将 unstable 中缓存的这些 Entry 记录交给上层模块进行处理，上层模块会将这些 Entry 记录发送到集群其他节点或进行保存（写入 Storage 中）。之后，上层模块会调用 Advance（）方法通知底层的 etcd-raft 模块将 unstable 中对应的 Entry 记录删除（因为己经保存到了 Storage 中）。正因为 unstable 中保存的 Entry 记录并未进行持久化，可能会因节点故障而意外丢失，所以被称为 unstable。
+
+unstable 提供的方法很多和 Storage 类似。raftLog 中，很多方法都是先尝试调用 unstable 方法，在其失败后返回 (0, false) 表示失败，在尝试 Storage 的对应方法。
+
+## raftLog 结构体
+代码路径：etcd/raft/log.go
+
+Raft 协议中日志复制部分的核心就是在集群中各个节点之间完成日志的复制，因此在 etcd-raft 模块的实现中使用 raftLog 结构来管理节点上的日志，就依赖于 Storage 接口和 unstable 结构体。
+
+raftLog 核心字段含义和功能：
+
+
+## raft
+代码路径：etcd/raft/raft.go
+
+etcd-raft 模块核心实现
+
