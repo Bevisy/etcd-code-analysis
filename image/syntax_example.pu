@@ -1,0 +1,18 @@
+@startuml
+' help theme
+!theme materia-outline
+Bob -> Alice :  hello
+Bob <- Alice :  $success("success: hello B.")
+Bob -x Alice :  $failure("failure")
+Bob ->> Alice : $warning("warning")
+@enduml
+
+
+@startuml
+' help theme
+!theme materia-outline
+B -> Alice :  hello
+Bob <- Alice :  $success("success: hello B.")
+Bob -x Alice :  $failure("failure")
+Bob ->> Alice : $warning("warning")
+@enduml

@@ -1,0 +1,8 @@
+@startuml
+!theme materia-outline
+
+L -> L : hello
+L -> F1 : hello2
+L -> F2 : hello3
+
+@enduml
