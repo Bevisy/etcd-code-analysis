@@ -1,0 +1,181 @@
+@startuml
+' !theme materia-outline
+
+title raft Example Flow Chart
+
+actor client as c1 #Blue
+participant node1 as n1 #Red
+participant node2 as n2 #Yellow
+participant node3 as n3 #Green
+
+== raftExample 启动 ==
+n1 -> n1: main.main()
+
+group main.main()
+    n1 -> n1: 配置初始化
+    note left: 解析命令行参数
+
+    n1 -> n1: proposeC := make(chan string)
+    n1 -> n1: confChangeC := make(chan raftpb.ConfChange)
+    note left: 新建 proposeC、confChangeC 通道
+
+    n1 -> n1: var kvs *kvstore
+    note left: raft 后端存储
+
+    n1 -> n1: newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
+    note left: 初始化 raftNode
+    return commitC, errorC, snapshotterReady
+
+    group newRaftNode()
+        n1 -> n1: commitC := make(chan *string)
+        n1 -> n1: errorC := make(chan error)
+        note left: 创建 commitC、errorC channel
+        n1 -> n1: &raftNode{}
+        note left: 初始化 raftNode 部分字段
+        n1 -> n1: go rc.startRaft()
+        note left: 启动协程以执行 startRaft()，在其中完成剩余初始化操作
+        return commitC, errorC, rc.snapshotterReady
+
+        group raftNode.startRaft()
+            n1 -> n1: !fileutil.Exist(rc.snapdir)
+            note left: 判断 snapdir 是否存在，不存在则创建
+
+            n1 -> n1: snap.New(zap.NewExample(), rc.snapdir)
+            n1 -> n1: rc.snapshotterReady <- rc.snapshotter
+            note left: 创建 Snapshotter 实例，并将 Snapshotter 实例\n通过 snapshotterReady 通道返回给上层应用
+
+            n1 -> n1: rc.replayWAL()
+            note left:创建 WAL 实例，加载快照并回放 WAL 日志
+            group raftNode.replayWAL()
+                n1 -> n1: snapshot := rc.loadSnapshot()
+                note left: 读取快照
+                return snapshot
+
+                n1 -> n1: w := rc.openWAL(snapshot)
+                note left: 根据读取到的 snapshot 实例元数据构建 WAL 实例
+
+                n1 -> n1: _, st, ents, err := w.ReadAll()
+                note left: 读取快照信息之后的 wal 日志，并获取状态信息
+
+                n1 -> n1: rc.raftStorage = raft.NewMemoryStorage()
+                note left: 创建持久化存储实例 MemoryStorage
+
+                alt snapshot != nil 
+                    n1 -> n1: rc.raftStorage.ApplySnapshot(*snapshot)
+                    note left: 加载快照数据到 MemoryStorage 中
+                end
+
+                n1 -> n1: rc.raftStorage.SetHardState(st)
+                note left: 将读取 wal 日志后得到的 HardState \n加载到 MemoryStorage 中
+
+                n1 -> n1: rc.raftStorage.Append(ents)
+                note left: 将读取 wal 日志中的 ents 追加到 MemoryStorage 中，\n这样 raft 将在正确的日志位置开始
+
+                alt 快照之后 ents 存在
+                    n1 -> n1: rc.lastIndex = ents[len(ents)-1].Index
+                    note left: 更新 raft.lastIndex，记录回放结束位置
+                else 快照之后 ents 不存在
+                    n1 -> n1: rc.commitC <- nil
+                    note left: 向 commitC 中写入 nil 作为信号
+                end
+            end
+
+            n1 -> n1: &raft.Config{}
+            note left: 创建 raft.Config 实例，用于启动 raftNode
+            alt wal 文件存在
+                n1 -> n1: rc.node = raft.RestartNode(c)
+                note left: 重启节点
+            else wal 文件不存在，新 raftNode
+                n1 -> n1: raft.StartNode(c, startPeers)
+                note left: 初始化底层 etcd-raft 模块，初次启动
+            end
+
+            n1 -> n1: &rafthttp.Transport{}
+            n1 -> n1: rc.transport.Start()
+            note left: 创建 transport 实例并启动，该实例负责集群中各个节点之间的网络通信
+
+            n1 -> n1: rc.transport.AddPeer(types.ID(i+1), []string{rc.peers[i]})
+            note left: 建立与集群其它节点的连接
+
+            n1 -> n1: go rc.serveRaft()
+            note left: 启动协程以监听当前节点与集群中其它节点之间的网络连接
+            group rc.serveRaft()
+                n1 -> n1: (&http.Server{Handler: rc.transport.Handler()}).Serve(ln)
+                note left: 创建 http.Server 实例，并提供服务
+            end
+
+            n1 -> n1: go rc.serveChannels()
+            note left: 启动协程以处理上层应用与底层 etcd-raft 模块的交互
+            group rc.serveChannels()
+                n1 -> n1: go func() <-rc.proposeC
+                note left: 启动协程处理 proposeC 通道上接收到的数据
+                n1 -> n1: go func() <-rc.confChangeC
+                note left: 启动协程处理 confChangeC 通道上接收到的数据
+
+                loop
+                    n1 -> n1: case <-ticker.C
+                    note left: 推进逻辑时钟
+
+                    n1 -> n1: case rd := <-rc.node.Ready()
+                    note left: 处理 Ready 实例数据
+
+                    group <-rc.node.Ready()
+                        n1 -> n1: rc.wal.Save(rd.HardState, rd.Entries)
+                        note left: 将获取的 Ready 实例中的 状态和待持久化的记录记录到 WAL 日志文件
+
+                        alt 存在快照数据
+                            n1 -> n1: rc.saveSnap(rd.Snapshot)
+                            note left: 将新的快照数据写入快照文件中
+
+                            n1 -> n1: rc.raftStorage.ApplySnapshot(rd.Snapshot)
+                            note left: 将新的快照数据持久化到 raftStorage.MemoryStorage 中
+
+                            n1 -> n1: rc.publishSnapshot(rd.Snapshot)
+                            note left: 通知上层应用(kvstore)加载新的快照
+                        end
+
+                        n1 -> n1: rc.raftStorage.Append(rd.Entries)
+                        note left: 将待持久化的 entries 追加到 raftStorage 中完成持久化
+
+                        n1 -> n1: rc.transport.Send(rd.Messages)
+                        note left: 将待发送的消息发送到指定节点
+
+                        n1 -> n1: rc.publishEntries(rc.entriesToApply(rd.CommittedEntries))
+                        note left: 将已提交、待应用的 Entry 记录应用到上层应用的状态机中
+
+                        n1 -> n1: rc.maybeTriggerSnapshot()
+                        note left: 触发快照操作，需要判断是否符合条件
+
+                        n1 -> n1: rc.node.Advance()
+                        note left: 通知上层模块返回新的 Ready 实例
+                    end
+
+                    n1 -> n1: case err := <-rc.transport.ErrorC
+                    note left: 处理网络异常
+
+                    n1 -> n1: case <-rc.stopc
+                    note left: 处理关闭信号
+                end
+            end
+        end
+    end
+
+    n1 -> n1: newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
+    note left: 新建 kvstore 实例；重放日志；启协程处理后续 commitC 通道
+
+    n1 -> n1: serveHttpKVAPI(kvs, *kvport, confChangeC, errorC)
+    note left: 启动服务，面向用户接受 GET/PUT 等请求
+    
+end
+
+== 处理请求 ==
+ c1 -> n1: PUT: k1=v1
+ note left: 新增键值对
+ n1 -> n1: httpKVAPI.ServeHTTP(w http.ResponseWriter, r *http.Request)
+ note left: 请求处理(假设请求直接发送给leader)
+
+ group httpKVAPI.ServeHTTP()
+    
+ end
+
+@enduml
