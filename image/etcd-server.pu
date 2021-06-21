@@ -1,0 +1,65 @@
+@startuml
+' !theme materia-outline
+
+title raft Example Flow Chart
+
+actor client as c1 #Blue
+participant node1 as n1 #Red
+participant node2 as n2 #Yellow
+participant node3 as n3 #Green
+
+n1 -> n1: main.main()
+note left: etcd 主程序入口
+
+n1 -> n1: etcdmain.Main()
+note left: etcd 启动
+
+n1 -> n1: startEtcdOrProxyV2()
+note left: 启动实现方法
+
+group startEtcdOrProxyV2()
+    n1 -> n1: cfg := newConfig()
+    note left: 初始化配置 cfg 实例
+
+    n1 -> n1: stratEtcd(cfg *embed.Config)
+    note left: 调用 StartEtcd() 启动 etcdserver，\n并且启动关联钩子
+
+    n1 -> n1: embed.StartEtcd(cfg)
+    note left: 启动etcd服务器和HTTP处理程序，用于客户端/服务器通信
+    group embed.StartEtcd(cfg)
+        n1 -> n1: srvcfg := etcdserver.ServerConfig{}
+        note left: 配置校验和初始化
+
+        n1 -> n1: e.server, _ := etcdserver.NewServer(srvcfg)
+        note left: etcdserver.EtcdServer 实例化，\n包括后端存储，raftNode等
+        group etcdserver.NewServer()
+
+        end
+
+        n1 ->n1: e.Server.Start()
+        note left: 启动 etcd server
+        group EtcdServer.Start()
+            n1 -> n1: s.start()
+            note left: 准备配置，并在goroutine中启动server
+
+            group EtcdServer.start()
+                n1 -> n1: EtcdServer 配置初始化
+
+                n1 -> n1: go s.run()
+                note left: 在goroutine中，启动server
+                group EtcdServer.run()
+                    n1 -> n1: sn, err := s.r.raftStorage.Snapshot()
+                    note left: 从 raftStorage 获取节点快照
+
+                    n1 -> n1: raftNode.start(rh)
+                    note left: raftNode 启动
+                    group raftNode.start()
+                        
+                    end
+                end
+            end
+
+        end
+    end
+end
+@enduml

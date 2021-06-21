@@ -1,0 +1,43 @@
+@startuml
+' !theme materia-outline
+
+title raft-unstable-storage-1
+
+actor client as c1 #Blue
+participant Leader as l1 #Red
+participant Follower1 as f1 #Yellow
+participant Follower2 as f2 #Green
+
+c1 -> l1: 请求A
+l1 -> l1: 将 A 存入 unstable
+l1 -> f1: 发送消息， A 请求
+f1 -> f1: 将 A 存入 unstable
+l1 -> f2: 发送消息，携带 A 请求
+f2 -> f2: 将 A 存入 unstable
+l1 -> l1: 将 A 写入 Storage
+f1 -> f1: 将 A 写入 Storage
+f2 -> f2: 将 A 写入 Storage
+
+@enduml
+
+@startuml
+' !theme materia-outline
+
+title raft-unstable-storage-2
+
+actor client as c1 #Blue
+participant Leader as l1 #Red
+participant Follower1 as f1 #Yellow
+participant Follower2 as f2 #Green
+
+c1 -> l1: 请求A
+l1 -> l1: 将 A 存入 unstable
+l1 -> f1: 发送消息， A 请求
+f1 -> f1: 将 A 存入 unstable
+l1 -> f2: 发送消息，携带 A 请求
+f2 -> f2: 将 A 存入 unstable
+l1 -> l1: 将 A 写入 Storage
+f1 -> f1: 将 A 写入 Storage
+f2 -> f2: 将 A 写入 Storage
+
+@enduml

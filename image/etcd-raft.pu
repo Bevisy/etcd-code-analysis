@@ -1,12 +1,225 @@
 @startuml
 ' !theme materia-outline
 
-title raft Example Flow Chart
+title etcd-raft-flow-chart-1
 
 actor client as c1 #Blue
 participant node1 as n1 #Red
 participant node2 as n2 #Yellow
 participant node3 as n3 #Green
+
+==初始化==
+n1 -> n1: newRaft()
+note left: 初始化创建 raft 实例
+group newRaft()
+    n1 -> n1: c.validate()
+    note left: 校验 Config 参数合法性
+
+    n1 ->n1: raftlog := newLogWithSize()
+    note left: 创建 raftLog 实例，用于记录 Entry
+
+    n1 ->n1: r := &raft{}
+    note left: 创建 raft 实例
+
+    n1 ->n1: cfg, prs, err := confchange.Restore()
+    note left: 初始化 peers 节点
+
+    n1 ->n1: r.becomeFollower(r.Term, None)
+    note left: 当前节点变成 Follower 节点
+end
+
+@enduml
+
+
+@startuml
+' !theme materia-outline
+
+title etcd-raft-message-type-1
+
+actor client as c1 #Blue
+participant node1 as n1 #Red
+participant node2 as n2 #Yellow
+participant node3 as n3 #Green
+
+n1 ->n1: r.tickElection()
+note left: 触发选举超时，发送 MsgHup 消息
+
+==MsgHup==
+
+n1 -> n1: r.Step(m pb.Message)
+note left: Follower 处理消息 MsgHup
+
+alt preVote
+    n1 ->n1: r.campaign(campaignPreElection)
+    note left: 切换当前节点角色，发起 MsgPreVote
+    group campaign()
+        n1 ->n1: r.becomePreCandidate()
+        note left: 切换角色为 MsgPreVote
+
+        n1 ->n1: voteMsg = pb.MsgPreVote
+        n1 ->n1: term = r.Term + 1
+        note left: 确定消息类型和周期+1
+
+        loop range peers.id
+            n1 ->n1: r.send(pb.Message, LogTerm, Context)
+            note left: 向集群其它节点发送 MsgPreVote
+        end
+        n1 ->n2: MsgPreVote
+        n1 ->n3: MsgPreVote
+    end
+else
+    ' n1 ->n1: r.campaign(campaignElection)
+    ' note left: 切换当前节点角色，发起 MsgVote
+end
+
+==MsgPreVote==
+
+n2 ->n2: r.Step(m pb.Message)
+note left: Follower 处理消息 MsgPreVote
+
+alt m.Term > r.Term
+    n2 -> n2: r.send(pb.Message{To: m.From, Term: m.Term, Type: voteRespMsgType(m.Type)})
+    note left: 响应消息 MsgPreVoteResp
+
+    n2 ->n1: MsgPreVoteResp
+
+else m.Term < r.Term
+    ' n2 -> n1: r.send(pb.Message{To: m.From, Term: r.Term, Type: pb.MsgPreVoteResp, Reject: true})
+end
+
+==MsgPreVoteResp==
+
+n1 ->n1: r.Step(m pb.Message)
+note left: PreCandidate 处理消息 MsgPreVoteResp
+
+n1 ->n1: stepCandidate(r *raft, m pb.Message)
+note left: 实际处理方法
+group stepCandidate()
+    n1 ->n1: gr, rj, res := r.poll(m.From, m.Type, !m.Reject)
+    note left: 判断是否超过法定节点
+
+    alt 投票成功
+        alt 角色为 PreCandidate
+            n1 ->n1: r.campaign(campaignElection)
+            note left: 切换角色为 Candidate,raft实例任期+1,\n并发送消息 MsgVote
+        end
+        n1 ->n2: MsgVote
+        n1 ->n3: MsgVote
+    else 投票失败
+        ' n1 ->n1: r.becomeFollower(r.Term, None)
+    end
+end
+
+==MsgVote==
+
+n2 ->n2: r.Step(m pb.Message)
+note left: Follower 处理消息 MsgVote 
+
+alt m.Term > r.Term
+    n2 -> n2: r.send(pb.Message{To: m.From, Term: m.Term, Type: voteRespMsgType(m.Type)})
+    note left: 响应消息 MsgVoteResp
+
+    n2 ->n1: MsgVoteResp
+
+else m.Term < r.Term
+    ' n2 -> n1: r.send(pb.Message{To: m.From, Term: r.Term, Type: pb.MsgPreVoteResp, Reject: true})
+end
+
+==MsgVoteResp==
+
+n1 ->n1: r.Step(m pb.Message)
+note left: Candidate 处理消息 MsgVoteResp
+
+n1 ->n1: stepCandidate(r *raft, m pb.Message)
+note left: 实际处理方法
+group stepCandidate()
+    n1 ->n1: gr, rj, res := r.poll(m.From, m.Type, !m.Reject)
+    note left: 判断是否超过法定节点
+
+    alt 投票成功
+        n1 ->n1: r.becomeLeader()
+        note left: 节点切换为 Leader，会追加一条空 Entry
+        ' TODO 展开描述
+
+        n1 ->n1: r.bcastAppend()
+        note left: 向集群中其它节点发送 MsgApp 或者 MsgSnap 消息
+        ' TODO 展开描述
+
+        n1 ->n2: MsgApp
+        n1 ->n3: MsgApp
+
+    else 投票失败
+        ' n1 ->n1: r.becomeFollower(r.Term, None)
+    end
+end
+
+==MsgApp==
+n2 ->n2: r.Step(m pb.Message)
+note left: Follower 处理消息 MsgApp
+
+n2 ->n2: stepFollower(r *raft, m pb.Message)
+note left: 实际处理方法
+group stepFollower()
+    n2 ->n2: r.electionElapsed = 0
+    note left: 重置选举计数器
+
+    n2 ->n2: r.lead = m.From
+    note left: 更新 Leader 节点
+
+    n2 ->n2: r.handleAppendEntries(m)
+    note left: 追加记录，返回消息 MsgAppResp
+    ' TODO 展开描述
+    
+    n2 ->n1: MsgAppResp
+end
+
+==MsgAppResp==
+
+n1 ->n1: r.Step(m pb.Message)
+note left: Leader 处理消息 MsgAppResp
+
+n1 ->n1: stepLeader(r *raft, m pb.Message)
+note left: 处理消息 MSgAppResp，并更新 peer 节点状态
+group stepLeader()
+    alt 拒绝
+        n1 ->n1: pr.MaybeDecrTo(m.Index, m.RejectHint)
+        note left: 修改 peer 字段，重新探测消息匹配位置，略
+    else 接受
+        n1 ->n1: pr.MaybeUpdate(m.Index)
+        note left: 更新节点对应进程的信息，更新节点状态
+        ' TODO pregress 实例作用
+
+        n1 ->n1: r.maybeCommit()
+        note left: 尝试查看此entry是否超过半数节点，\n并更新 raftLog.Committed
+
+        loop r.maybeSendAppend(m.From, false)
+            n1 ->n2: MsgApp
+            note left: 在流控限制内，尽可能多的发送消息
+            ' TODO 流控机制
+        end
+    end
+end
+
+==MsgBeat和MsgCheckQuorom==
+' Leader 节点除了会向 Follower 节点发送 MsgApp 消息，还会发送 MsgBeat 消息
+' MsgBeat 消息主要是为了节点探活，当 Follower 节点收到 MsgBeat 消息时会重置其选举计时器，从而防止 Follower 节点发起新一轮选举
+
+n1 ->n1: r.tickHeartbeat()
+note left: 触发心跳
+group tickHeart()
+    n1 ->n1: r.heartbeatElapsed++
+    note left: 递增心跳计时器
+
+    alt r.heartbeatElapsed >= r.heartbeatTimeout
+        n1 ->n1: r.Step(pb.Message{From: r.id, Type: pb.MsgBeat})
+        note left: 发送心跳消息
+    end
+end
+
+n1 ->n1: r.Step(m pb.Message)
+n1 ->n1: stepLeader(r *raft, m pb.Message)
+n1 ->n1: r.bcastHeartbeat()
+note left: 广播心跳消息
 
 
 @enduml

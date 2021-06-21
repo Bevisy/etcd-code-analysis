@@ -6,3 +6,294 @@ https://bevisy.github.io
 binbin36520{at}gmail.com
 
 ## raft 协议
+基本概念：
+- Node：对 etcd-raft 模块具体实现的封装，方便上层模块调用 etcd-raft 模块
+- 上层模块：etcd-raft 模块的调用者，上层模块通过 Node 提供的 API 与底层的 etcd-raft 模块交互
+- Cluster：代表集群，其中记录了该集群的基础信息
+- Member：组成 Cluster 的元素之一，其中封装了一个节点的基本信息
+- Peer：集群中某一节点对其它节点的称呼
+- Message：集群节点间相互传递的消息
+- Entry 记录：节点之前传递的每条 Message 可以携带多条 Entry 记录，每条 Entry 对应一个独立的操作
+
+## 结构体/接口 释义
+1. Entry 结构体
+```
+type Entry struct {
+	Term             uint64    // Entry 所在的任期
+	Index            uint64    // Entry 对应的索引
+	Type             EntryType // Entry 的类型
+	Data             []byte    // 具体操作的数据
+}
+```
+
+```go
+enum EntryType { // Entry 类型
+	EntryNormal       = 0;
+	EntryConfChange   = 1; // corresponds to pb.ConfChange
+	EntryConfChangeV2 = 2; // corresponds to pb.ConfChangeV2
+}
+```
+
+##
+2. Message 结构体
+```go
+type Message struct { // etcd-raft 模块中所有消息的抽象
+	Type             MessageType // 消息类型
+	To               uint64      // 发送目标节点 ID
+	From             uint64      // 发送节点 ID
+	Term             uint64      // 发送节点任期；若 Term 为0，则为本地消息
+	LogTerm          uint64      // 该消息携带的第一条 Entry 的 Term 值
+	Index            uint64      // 由具体消息类型决定
+	Entries          []Entry     // 由具体消息类型决定
+	Commit           uint64      // 消息发送节点的提交位置
+	Snapshot         Snapshot    // 若为快照类型消息时，该字段保存快照数据
+	Reject           bool        // 用于响应类消息，表示是否拒绝收到的消息
+	RejectHint       uint64      // Follower 拒绝 Leader 消息后，会在该字段添加一个 Entry 的索引值，
+                                 // 供 Leader 节点参考
+	Context          []byte      // 消息携带的上下文信息
+}
+```
+// Index: 例如，MsgApp 中 Index 为携带的 Entries 记录中前一条记录的索引；MsgAppResp 中 Index 字段则是提示 Leader 节点下次从哪个位置开始发送 Entry 记录。
+// Entries: 例如，MsgApp 中该字段为发送到 Follower 节点的 Entry 记录；
+// Context: 消息携带的上下文信息。例如，该消息是否与 Leader 节点转移相关
+
+##
+3. MessageType
+```go
+type MessageType int32 // 消息类型
+const (
+	MsgHup            MessageType = 0
+	MsgBeat           MessageType = 1
+	MsgProp           MessageType = 2
+	MsgApp            MessageType = 3
+	MsgAppResp        MessageType = 4
+	MsgVote           MessageType = 5
+	MsgVoteResp       MessageType = 6
+	MsgSnap           MessageType = 7
+	MsgHeartbeat      MessageType = 8
+	MsgHeartbeatResp  MessageType = 9
+	MsgUnreachable    MessageType = 10
+	MsgSnapStatus     MessageType = 11
+	MsgCheckQuorum    MessageType = 12
+	MsgTransferLeader MessageType = 13
+	MsgTimeoutNow     MessageType = 14
+	MsgReadIndex      MessageType = 15
+	MsgReadIndexResp  MessageType = 16
+	MsgPreVote        MessageType = 17
+	MsgPreVoteResp    MessageType = 18
+)
+```
+
+##
+4. raft 结构体 - 核心数据结构，封装了当前节点全部核心数据
+```go
+type raft struct {
+	id uint64 // 当前节点集群ID
+
+	// 当前任期号。如果 Message 的 Term 字段为 0，则表示该消息是本地消息，例如，后面提到的 MsgHup 、 MsgProp 、 MsgReadlndex 等消息 ， 都属于本地消息
+	Term uint64
+	// 当前任期中当前节点选票投给节点，未投票时，字段为 None
+	Vote uint64
+
+	readStates []ReadState
+
+	// 本地 log
+	raftLog *raftLog
+
+	// 单条消息最大字节数
+	maxMsgSize         uint64
+	maxUncommittedSize uint64
+
+	// 对等节点日志复制情况（NextIndex，MarchIndex）
+	prs tracker.ProgressTracker
+
+	// 当前节点角色 "StateFollower","StateCandidate","StateLeader","StatePreCandidate"
+	state StateType
+
+	// 为 true 则当前 raft 节点为 learner
+	isLearner bool
+
+	// 等待发送的消息队列
+	msgs []pb.Message
+
+	// the leader id
+	lead uint64
+	// leadTransferee is id of the leader transfer target when its value is not zero.
+	// Follow the procedure defined in raft thesis 3.10.
+	// 用于集群 Leader 节点的转移，记录此次节点转移的目标节点ID
+	leadTransferee uint64
+	// Only one conf change may be pending (in the log, but not yet
+	// applied) at a time. This is enforced via pendingConfIndex, which
+	// is set to a value >= the log index of the latest pending
+	// configuration change (if any). Config changes are only allowed to
+	// be proposed if the leader's applied index is greater than this
+	// value.
+	// 每次只能有一个conf变更是待定的（在日志中，但尚未应用）。这一点通过 pendingConfIndex 强制执行，该值被设置为 >= 最新待定配置变更（如果有的话）的日志索引。只有当领导者的应用索引大于此值时，才允许提出配置变更。
+	pendingConfIndex uint64
+	// an estimate of the size of the uncommitted tail of the Raft log. Used to
+	// prevent unbounded log growth. Only maintained by the leader. Reset on
+	// term changes.
+	// 对 Raft 日志中未提交的尾部大小的估计。用来防止日志的无限制增长。仅由领导者维护。在 Term 变化时重置。
+	uncommittedSize uint64
+
+	readOnly *readOnly
+
+	// number of ticks since it reached last electionTimeout when it is leader
+	// or candidate.
+	// number of ticks since it reached last electionTimeout or received a
+	// valid message from current leader when it is a follower.
+	// 当它是领导者或候选人时，它达到最后一次选举时间的刻度数。 当它是追随者时，它达到最后一次选举时间的刻度数或收到当前领导者的有效信息的刻度数。
+	electionElapsed int
+
+	// number of ticks since it reached last heartbeatTimeout.
+	// only leader keeps heartbeatElapsed.
+	heartbeatElapsed int
+
+	// CheckQuorum 机制： 每隔一段时间， Leader 节点会尝试连接集群中的其他节点（发送心跳消息），如果发现自己可以连接到节点个数没有超过半数（即没有收到足够的心跳响应），则主动切换成 Follower 状态。
+	checkQuorum bool
+	// 节点进入 candidate 之前，需要连接其他节点发送消息询问是否参与选举，当超过半数节点响应并参与新一轮的选举，则可以发起新一轮选举
+	preVote bool
+
+	// 心跳超时时间， 当 heartbeatElapsed 字段值到达该值时，就会触发 Leader 节点发送一条心跳消息。
+	heartbeatTimeout int
+	electionTimeout  int
+	// randomizedElectionTimeout is a random number between
+	// [electiontimeout, 2 * electiontimeout - 1]. It gets reset
+	// when raft changes its state to follower or candidate.
+	randomizedElectionTimeout int
+	disableProposalForwarding bool
+
+	tick func()
+	step stepFunc
+}
+```
+
+##
+5. Storage 接口及其实现
+```go
+type Storage interface {
+	InitialState() (pb.HardState, pb.ConfState, error)
+	Entries(lo, hi, maxSize uint64) ([]pb.Entry, error)
+	Term(i uint64) (uint64, error)
+	LastIndex() (uint64, error)
+	FirstIndex() (uint64, error)
+	Snapshot() (pb.Snapshot, error)
+}
+```
+MemoryStorage 实现了 Storage 接口
+```go
+type MemoryStorage struct {
+	hardState pb.HardState
+	snapshot  pb.Snapshot 
+	ents []pb.Entry
+}
+```
+
+##
+MemoryStorage 结构存储视图
+
+.image image/etcd-memory-storage.png 
+
+##
+etcd-raft 中除了 Storage 存储 Entry 记录，unstable 模块也会存储 Entry 记录
+
+.image image/raft-unstable-storage-1.png 504 450
+
+##
+6. unstable 结构体
+```go
+type unstable struct {
+	// 快照数据，该快照数据也是未写入 Storage 中的 Entry 记录
+	snapshot *pb.Snapshot
+	// 所有未被保存到 Storage 中的 Entry 记录
+	entries []pb.Entry
+	// entries 中第一条记录的索引值
+	offset uint64
+}
+```
+unstable 提供很多类似 Storage 的方法
+// TODO: 需要描述为何会提供类似方法
+
+##
+7. raftLog 结构体
+```go
+type raftLog struct { // 日志复制的核心数据结构
+	// storage contains all stable entries since the last snapshot.
+	storage Storage
+
+	// unstable contains all unstable entries and snapshot.
+	// they will be saved into storage.
+	unstable unstable
+
+	// committed is the highest log position that is known to be in
+	// stable storage on a quorum of nodes.
+	committed uint64
+	// applied is the highest log position that the application has
+	// been instructed to apply to its state machine.
+	// Invariant: applied <= committed
+	applied uint64
+
+	// maxNextEntsSize is the maximum number aggregate byte size of the messages
+	// returned from calls to nextEnts.
+	maxNextEntsSize uint64
+}
+```
+
+##
+创建 raftLog 实例
+```go
+func newLog(storage Storage, logger Logger) *raftLog {
+	return newLogWithSize(storage, logger, noLimit)
+}
+
+func newLogWithSize(storage Storage, logger Logger, maxNextEntsSize uint64) *raftLog {
+	log := &raftLog{ // 创建 raftLog 实例，并初始化 storage 字段
+		storage:         storage,
+		logger:          logger,
+		maxNextEntsSize: maxNextEntsSize,
+	}
+	// 获取 storage 中第一和最后一个 Entry 的索引
+	firstIndex, err := storage.FirstIndex()
+	lastIndex, err := storage.LastIndex()
+
+	log.unstable.offset = lastIndex + 1 // 初始化 unstable.offset
+
+	// 初始化 comiitted、applied 字段为上一次快照的索引
+	log.committed = firstIndex - 1
+	log.applied = firstIndex - 1
+
+	return log
+}
+```
+
+##
+newLog() 完成节点 Entry 存储视图
+
+.image image/etcd-raft-raftLog.png 
+
+
+## Raft 实现
+1. 初始化
+
+.image image/etcd-raft-flow-chart-1.png 495 558
+
+##
+2. 节点角色切换
+
+.image image/etcd-raft-role-switch-1.png
+
+// TODO：节点角色切换具体实现
+##
+3. 消息处理
+
+raft 节点初始化 raft 实例后，当前节点角色为 Follower。假设新建三节点集群，集群启动后节点均处于 Follower 状态，集群默认开启 PreVote 模式和 CheckQuorum 模式
+
+
+//- 节点初始化
+//- 选举
+//- 写请求
+//- 读请求
+//- wal 日志读写
+//- 快照读写
+//- Msg 消息类型展开
+//- rafthttp
