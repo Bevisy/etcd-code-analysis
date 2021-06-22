@@ -1,7 +1,7 @@
 # etcd raft
 
 Zhang Binbin
-2021-05-16
+2021-06-16
 https://bevisy.github.io
 binbin36520{at}gmail.com
 
@@ -288,13 +288,21 @@ newLog() 完成节点 Entry 存储视图
 
 raft 节点初始化 raft 实例后，当前节点角色为 Follower。假设新建三节点集群，集群启动后节点均处于 Follower 状态，集群默认开启 PreVote 模式和 CheckQuorum 模式
 
-[详细流程图](http://zbbx.ml:3999)
+[详细流程图](https://raw.githubusercontent.com/Bevisy/etcd-code-analysis/main/image/etcd-raft-message-type-1.png)
 
 ##
 Leader 节点转移
 一般我们指定一个特定的节点作为下一个任期的 Leader 节点，当前 Leader 节点会选择一个合适的节点，然后发送 MsgTransferLeader 消息（本地消息）
 
+[详细流程图](https://raw.githubusercontent.com/Bevisy/etcd-code-analysis/main/image/etcd-raft-message-type-1.png)
 
+## node 接口及其实现
+
+TODO
+
+## raftExample
+
+TODO
 
 //- 节点初始化
 //- 选举
