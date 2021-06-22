@@ -200,7 +200,7 @@ group stepLeader()
     end
 end
 
-==MsgBeat和MsgCheckQuorom==
+==MsgBeat==
 ' Leader 节点除了会向 Follower 节点发送 MsgApp 消息，还会发送 MsgBeat 消息
 ' MsgBeat 消息主要是为了节点探活，当 Follower 节点收到 MsgBeat 消息时会重置其选举计时器，从而防止 Follower 节点发起新一轮选举
 
@@ -212,14 +212,491 @@ group tickHeart()
 
     alt r.heartbeatElapsed >= r.heartbeatTimeout
         n1 ->n1: r.Step(pb.Message{From: r.id, Type: pb.MsgBeat})
-        note left: 发送心跳消息
+        note left: 调用 r.step()，发送心跳消息
     end
 end
 
 n1 ->n1: r.Step(m pb.Message)
+note left: Leader 节点处理 MsgBeat
 n1 ->n1: stepLeader(r *raft, m pb.Message)
+
 n1 ->n1: r.bcastHeartbeat()
 note left: 广播心跳消息
 
+loop range ids
+    n1 ->n1: r.sendHeartbeat(id, ctx)
+    note left: 向 peer 节点发送心跳
+
+    n1 ->n2: MsgHeartBeat
+    n1 ->n2: MsgHeartBeat
+end
+
+==MsgHeartBeat==
+
+n2 ->n2: r.Step(m pb.Message)
+note left: Follower 节点处理 MsgHeartBeat
+
+n2 ->n2: stepFollower(r *raft, m pb.Message)
+note left: 实际处理方法
+group stepFollower
+    n2 ->n2: r.electionElapsed = 0
+    note left: 重置选举计数器
+	n2 ->n2: r.lead = m.From
+    note left: 设置 leader 节点 id
+	n2 ->n2: r.handleHeartbeat(m)
+    note left: 修改 raftLog.committed 字段，\n发送消息 MsgHeartbeatResp，响应心跳
+    ' commit := min(r.prs.Progress[to].Match, r.raftLog.committed)
+    ' 注意: MsgHeartbeat 消息中 Commit 字段的设置，这里是因为在发送该 MsgHeartbeat 消息时，而 Follower 节点并不一定已经收到了全部已提交的 Entry 记录。所以取 Progress 内 Match 或者 节点最新 Committed 索引的最小值。这样确保消息一定会被接受
+
+    n2 ->n1: MsgHeartbeatResp
+    n3 ->n1: MsgHeartbeatResp
+end
+
+==MsgHeartBeatResp==
+
+n1 ->n1: r.Step(m pb.Message)
+note left: Leader 节点处理 MsgHeartbeatResp
+n1 ->n1: stepLeader(r *raft, m pb.Message)
+note left: 实际处理方法
+group stepLeader
+    n1 ->n1: pr.RecentActive = true
+    n1 ->n1: pr.ProbeSent = false
+    note left: 更新 peer 对应字段，表示节点已连通，\n可继续发送消息
+
+    alt pr.Match < r.raftLog.lastIndex()
+        n1 ->n1: r.sendAppend(m.From)
+        note left: 校验index，向指定节点发送消息继续 Entry 复制
+    end
+end
+
+==MsgProp==
+
+' 只有 Leader 节点可以响应客户端的 MsgProp 写入请求。
+' 在开启 propose 转发的情况下，fllower 节点可以将请求转发到 Leader 节点，否则直接丢弃
+' Candidate，PreCandidate 角色直接丢弃 MsgProp
+
+c1 ->n1: MsgProp
+note left: 客户端写入请求
+
+n1 ->n1: r.Step(m pb.Message)
+note left: Leader 节点处理 MsgProp
+
+n1 ->n1: stepLeader(r *raft, m pb.Message)
+note left: 实际处理方法
+group stepLeader()
+    alt len(m.Entries) == 0
+        n1 ->n1: 丢弃消息
+        note left: 请求未携带 entries，直接丢弃
+    end
+    
+    ' 简化步骤，略去 ConfigChange
+    n1 ->n1: r.appendEntry(m.Entries...)
+    note left: 将请求中的 entries 追加到当前节点
+
+    n1 ->n1: r.bcastAppend()
+    note left: 通过 MsgApp 消息向集群中其他节点复制 Entry 记录
+
+    n1 ->n2: MsgApp
+    n1 ->n3: MsgApp
+end
+
+==MsgProp==
+
+c1 ->n2: MsgProp
+note left: 客户端写入请求
+
+n1 ->n1: r.Step(m pb.Message)
+note left: Follower 节点处理 MsgProp
+
+n1 ->n1: stepFollower(r *raft, m pb.Message)
+note left: 实际处理方法
+group stepFollower
+    alt r.lead == None
+        n2 ->n2: 丢弃
+        note left: 集群没有 leader 节点
+    end
+
+    alt r.disableProposalForwarding
+        n2 ->n2: 丢弃
+        note left: 未开启请求转发
+    else
+        n2 ->n2: m.To = r.lead
+        note left: 设置消息目标节点为 leader 节点
+
+        n2 ->n1: MsgProp
+    end
+end
+
+==MsgProp==
+
+c1 ->n2: MsgProp
+note left: 客户端写入请求
+
+n2 ->n2: r.Step(m pb.Message)
+note left: 假设请求到 Candidate 节点处理 MsgProp
+
+n2 ->n2: stepFollower(r *raft, m pb.Message)
+note left: 直接丢弃
+
+
+==MsgReadIndex==
+
+' Follower
+c1 ->n2: MsgReadIndex
+note left: Follower
+
+n2 ->n2: r.Step(m pb.Message)
+note left: Follower 节点处理 MsgReadIndex
+
+n2 ->n1: MsgReadIndex
+note left: 请求转发到 Leader
+
+' Candidate
+c1 ->n2: MsgProp
+note left: 客户端写入请求
+
+n2 ->n2: r.Step(m pb.Message)
+note left: 假设节点为 Candidate 角色，Candidate 节点处理 MsgReadIndex
+
+n2 ->n2: stepCandidate()
+note left: 实际处理方法
+group stepCandidate
+    n2 ->n2: 直接丢弃
+end
+
+' Leader 节点处理 MsgReadIndex
+c1 ->n1: MsgReadIndex
+note left: 客户端读取请求
+
+n1 ->n1: r.Step(m pb.Message)
+note left: Leader 节点处理 MsgReadIndex
+
+n1 ->n1: stepLeader(r *raft, m pb.Message)
+note left: 实际处理方法
+group stepLeader
+    alt  r.readOnly.option == ReadOnlySafe
+        ' 1. 确保读请求获取的数据一定是最新的，因为 Leader 节点数据是集群中最新的
+        ' 2. 集群网络分区情况下，少数派无法响应读请求
+        n1 ->n1: r.readOnly.addRequest(r.raftLog.committed, m)
+        note left: 记录当前节点的 raftLog.committed 位置
+
+        n1 ->n1: r.readOnly.recvAck(r.id, m.Entries[0].Data)
+        note left: 本节点自动 ack 读请求
+
+        n1 ->n1: r.bcastHeartbeatWithCtx(m.Entries[0].Data)
+        note left: 发送心跳，ctx 为 MsgReadIndex 的请求 ID
+
+        n1 ->n2: MsgHeartbeat
+        n1 ->n3: MsgHeartbeat
+
+        ' 分析 Follower 角色
+        n2 ->n2: r.Step(m pb.Message)
+        note left: Follower 节点处理 MsgHeartbeat
+        
+        n2 ->n2: stepFollower()
+        note left: 实际处理方法
+        group stepFollower
+            n2 ->n2: r.send(pb.Message{To: m.From, Type: pb.MsgHeartbeatResp, Context: m.Context})
+            note left: Follower 返回心跳 MsgHeartbeatResp
+        
+            n2 ->n1: MsgHeartbeatResp
+            note left: 携带 m.Context (只读请求 ID)
+        end
+        
+        ' 分析 Candidate 角色
+        n2 ->n2: r.Step(m pb.Message)
+        note left: 假设节点为 Candidate 角色，Candidate 节点处理 MsgHeartbeat
+        
+        n2 ->n2: stepCandidate()
+        note left: 实际处理方法
+        group stepCandidate
+            n2 ->n2: r.becomeFollower(m.Term, m.From)
+            note left: 角色转换为 Follower
+
+            n2 ->n2: r.send(pb.Message{To: m.From, Type: pb.MsgHeartbeatResp, Context: m.Context})
+            note left: Follower 返回心跳 MsgHeartbeatResp
+        
+            n2 ->n1: MsgHeartbeatResp
+            note left: 携带 m.Context (只读请求 ID)
+        end
+
+        ' Leader 处理 MsgHeartbeatResp
+        n1 ->n1: r.Step(m pb.Message)
+        note left: Leader 节点处理 MsgHeartbeatResp
+
+        n1 ->n1: stepLeader(r *raft, m pb.Message)
+        note left: 实际处理方法
+        group stepLeader
+            n1 ->n1: rss := r.prs.Voters.VoteResult(r.readOnly.recvAck(m.From, m.Context)) != quorum.VoteWon
+            note left: 判断指定消息心跳响应是否达到法定节点
+
+            loop range rss
+                alt req.From == None || req.From == r.id
+                    n1 ->n1: r.readStates = append(r.readStates, ReadState{Index: rs.index, RequestCtx: req.Entries[0].Data})
+                    note left: 根据 MsgReadIndex 消息的 From 字段，判断该 MsgReadindex 消息是否为 Follower 节点转发到 Leader 节点的消息。\n如果是客户端直接发送到 Leader 节点的消息，则将 MsgReadindex 消息对应的已提交位置以及其消息 ID 封装成 ReadState 实例，\n添加到 raft.readStates 中保存。\n后续会有其他 goroutine 读取该数组，并对相应的 MsgReadindex 消息进行响应
+                else
+                    n1 ->n2: r.send(pb.Message{To: req.From, Type: pb.MsgReadIndexResp, Index: rs.index, Entries: req.Entries})
+                    note left: 发送 MsgReadIndexResp消息，携带请求所需的 Index
+
+                    n1 -> n2: MsgReadIndexResp
+                end
+            end
+        end
+
+
+    else r.readOnly.option == ReadOnlyLeaseBased
+        n1 ->n1: ri := r.raftLog.committed
+        note left: 取本节点 Committed 记录
+
+        n1 ->n1: r.readStates = append(r.readStates, ReadState{Index: ri, RequestCtx: m.Entries[0].Data})
+        note left: 写入 readStates，待上层应用状态到达 committed，即可向客户端返回消息
+
+        ' TODO 解释为什么 LeaseRead 不安全
+    end
+end
+
+==MsgReadIndexResp==
+
+' 分析 Follower 角色
+n2 ->n2: r.Step(m pb.Message)
+note left: Follower 节点处理 MsgReadIndexResp
+
+n2 ->n2: stepFollower()
+note left: 实际处理方法
+group stepFollower
+    n2 ->n2: r.readStates = append(r.readStates, ReadState{Index: m.Index, RequestCtx: m.Entries[0].Data})
+    note left: 写入 readStates，待上层应用状态到达 committed，即可向客户端返回消息
+end
+
+' 分析 Candidate 角色
+n2 ->n2: r.Step(m pb.Message)
+note left: 假设节点为 Candidate 角色，Candidate 节点处理 MsgReadIndexResp
+
+n2 ->n2: stepCandidate()
+note left: 实际处理方法
+group stepCandidate
+    n2 ->n2: 直接丢弃
+end
+
+==MsgSnap==
+
+' Follower 长期宕机后恢复，Leader 节点会考虑发送快照
+
+n1 ->n1: r.sendAppend(to uint64)
+note left: Leader 节点发送 Snapshot
+
+n1 ->n1: r.maybeSendAppend(to, true)
+note left: 尝试判断是否需要发送快照
+
+group maybeSendAppend
+    n1 ->n1: term, errt := r.raftLog.term(pr.Next - 1)
+    n1 ->n1: ents, erre := r.raftLog.entries(pr.Next, r.maxMsgSize)
+    note left: 获取待发送 peer 节点索引对应的 Term 和 ents
+
+    alt 指定索引对应的 Term 或者 ents 获取失败
+        n1 ->n1: m := pb.Message{}
+        note left: 创建待发送的消息
+        n1 ->n1: m.To = to
+        note left: 设置目标节点
+
+        n1 ->n1: pr.RecentActive
+        note left: 判断 peer 节点是否连通
+
+        n1 ->n1: m.Type = pb.MsgSnap
+        note left: 修改发送消息类型
+
+        n1 ->n1: snapshot, err := r.raftLog.snapshot()
+        note left: 获取待发送的快照
+        
+        n1 ->n1: m.Snapshot = snapshot
+        note left: 追加快照数据
+
+        n1 ->n1: pr.BecomeSnapshot(sindex)
+        note left: 修改指定节点状态为 StateSnapshot，\n并指定快照索引
+
+        n1 ->n1: r.send(m)
+        note left: 发送消息 MsgSnap
+
+        n1 ->n2: MsgSnap
+    end
+end
+
+n2 ->n2: stepFollower()
+note left: r.Step(),然后 stepFollower() 处理快照信息
+group stepFollower
+    n2 ->n2: r.electionElapsed = 0
+    note left: 重置选举计数器
+
+	n2 ->n2: r.lead = m.From
+    note left: 设置 leader 节点 id
+
+	n2 ->n2: r.handleSnapshot(m)
+    note left: 根据 MsgSnap 消息中的快照数据，重建当前节点的 raftLog
+    group handleSnapshot
+        n2 ->n2: sindex, sterm := m.Snapshot.Metadata.Index, m.Snapshot.Metadata.Term
+        note left: 获取快照元数据 Term 和 Index
+
+        n2 ->n2: r.restore(m.Snapshot)
+        note left: 重建节点 raftLog
+
+        alt 快照恢复成功
+            n2 ->n2: r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.lastIndex()})
+            note left: 返回消息 MsgAppResp, 携带快照索引
+        else 快照过时，导致恢复失败
+            n2 ->n2: r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.lastIndex()})
+            note left: 返回消息 MsgAppResp, 携带节点最后提交位置
+        end
+
+        n2 ->n1: MSgAppResp
+    end
+end
+
+==MsgTransferLeader==
+
+' Leader 节点转移
+' 一般我们指定一个特定的节点作为下一个任期的 Leader 节点，当前 Leader 节点会选择一个合适的节点，然后发送 MsgTransferLeader 消息（本地消息）
+
+n1 ->n1: MsgTransferLeader
+note left: 本地消息 MsgTranferLeader 处理
+
+n1 ->n1: stepLeader()
+note left: 实际处理消息方法
+group stepLeader
+    n1 ->n1: pr.IsLearner
+    note left: 目标节点是 Learner，丢弃消息
+
+    n1 ->n1: leadTransferee := m.From
+    note left: 在 MsgTransferLeader 消息中， From 字段记录了\n此次 Leader 节点迁移操作的目标 Follower 节点 ID
+
+    n1 ->n1: lastLeadTransferee := r.leadTransferee
+    n1 ->n1: lastLeadTransferee != None
+    note left: 目标节点相同，则忽略此次 Leader 迁移操作\n若目标节点不同，则清空上次记录的 ID ｛即 raft.leadTransferee)
+
+    n1 ->n1: r.electionElapsed = 0
+    note left: 重置选举计数器，\nLeader 迁移操作应该在 electionTirneout 时间内完成
+
+    alt pr.Match == r.raftLog.lastIndex()
+        n1 ->n2: r.sendTimeoutNow(leadTransferee)
+        note left: 检测目标 Follower 节点是否与当前 Leader 节点的 raftLog 是否完全一致\n向目标 Follower 节点发送 MsgTimeoutNow 消息，\n这会导致 Follower 节点的选举计时器立即过期，并发起新一轮选举
+
+        n1 ->n2: MsgTimeoutNow
+
+        n2 ->n2: n1 ->n1: stepFollower()
+        note left: 处理 MsgTimeoutNow
+        group stepFollower
+            n2 ->n2: r.promotable()
+            note left: 检测当前节点是否已经被移出集群
+
+            n2 ->n2: r.campaign(campaignTransfer)
+            note left: 即使当前集群开启了 preVote 模式，\n目标 Follower 节点也会直接发起新一轮选举
+
+            n2 ->n1: MsgVote
+            note left: 节点转移场景下产生的，则强制当前节点参与本次选举
+            n2 ->n3: MsgVote
+
+            n1 ->n1: 参考之前 MsgVote 选举流程
+            n3 ->n3: 参考之前 MsgVote 选举流程
+        end
+    else raftLog 中的 Entry 记录不完全匹配
+        n1 ->n1: r.sendAppend(leadTransferee)
+        note left: Leader 节点通过发送 MsgApp 消息向目标节点进行复制
+
+        n1 ->n2: MsgApp
+        note left: 直到 Entry 记录一致
+
+        n2 ->n1: MsgAppResp
+
+        n1 ->n1: stepLeader()
+        note left: 处理消息 MsgAppResp
+        group m.From == r.leadTransferee && pr.Match == r.raftLog.lastIndex()
+            n1 ->n1: r.sendTimeoutNow(m.From)
+            note left: 重新发送 MsgTimeoutNow
+
+            n1 ->n2: MsgTimeoutNow
+        end
+    end
+end
+
+==MsgCheckQuorum==
+
+n1 ->n1: r.tickHeartbeat()
+note left: Leader 节点心跳触发
+group tickHeartbeat
+    n1 ->n1: r.electionElapsed++
+    note left: 递增选举计时器
+    
+    alt r.electionElapsed >= r.electionTimeout
+        n1 ->n1: r.electionElapsed = 0
+        note left: Leader 不主动发起选举，直接重置选举计数器
+
+        alt r.checkQuorum
+            n1 ->n1: r.Step(pb.Message{From: r.id, Type: pb.MsgCheckQuorum})
+            note left: 选举计数器超时，触发一次 checkQuorum 操作
+
+            n1 ->n1: MsgCheckQuorum
+            
+            n1 ->n1: stepLeader()
+            note left: 处理消息 MsgCheckQuorum
+            group stepLeader
+                n1 ->n1: pr := r.prs.Progress[r.id]
+                note left: 处理 leader 不在配置中的情况(例如，自己删除自己)
+
+                alt !r.prs.QuorumActive()
+                    n1 ->n1: r.becomeFollower(r.Term, None)
+                    note left: 检测当前 Leader 节点是否与集群中大部分节点连通，\n不连通则 Leader 节点更改状态为 Follower
+                end
+
+                n1 ->n1: r.prs.Visit(func(id uint64, pr *tracker.Progress)
+                note left: 重置集群全部节点为 inactive，\n为下一次 CheckQuorum 做准备
+            end
+        end
+    end
+end
+
+==MsgUnreachable==
+' 上层应用会产生节点不可达的通知，需要 Leader 节点处理
+
+n1 ->n1: node.ReportUnreachable(id uint64)
+note left: Leader 节点上层应用发送 peer 节点不可达消息 MsgUnreachable
+
+n1 ->n1: MsgUnreachable
+
+n1 ->n1: stepLeader()
+note left: 处理消息 MsgUnreachable
+group stepLeader
+    alt pr.State == tracker.StateReplicate
+        n1 ->n1: pr.BecomeProbe()
+        note left: 将 peer 节点设置为需要重新探测状态
+    end
+end
+
+==MsgSnapStatus==
+
+' 快照发送完成时，产生消息 MsgSnapStatus，返回快照发送状态
+n1 ->n1: node.ReportSnapshot
+note left: Leader 节点上层应用发送消息 MsgSnapStatus
+
+n1 ->n1: MsgSnapStatus
+
+n1 ->n1: stepLeader()
+note left: 处理消息 MsgSnapStatus
+group stepLeader
+    alt pr.State != tracker.StateSnapshot
+        n1 ->n1: 丢弃
+        note left: peer 节点不处于 StateSnapshot 状态，丢弃信息
+    end
+
+    alt !m.Reject
+        n1 ->n1: pr.BecomeProbe()
+        note left: 快照发送完成，等待探测并复制消息
+    else 快照被拒绝
+        n1 ->n1: pr.PendingSnapshot = 0
+		n1 ->n1: pr.BecomeProbe()
+        note left: 快照发送失败，清空快照pending记录，\n节点状态切换为 StateProbe
+
+        n1 ->n1: pr.ProbeSent = true
+        note left: 如果快照完成，在发送下一个MsgApp之前等待来自远程节点的MsgAppResp。\n如果快照失败，在下一次尝试之前等待一个心跳间隔
+    end
+end
 
 @enduml
