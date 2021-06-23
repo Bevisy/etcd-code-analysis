@@ -5,7 +5,11 @@ Zhang Binbin
 https://bevisy.github.io
 binbin36520{at}gmail.com
 
+## etcd-arch
+
+.image image/etcd-arch.jpg 435 589
 ## raft 协议
+源码目录： [etcd-release-3.4](https://github.com/Bevisy/etcd/tree/release-3.4/raft)
 基本概念：
 - Node：对 etcd-raft 模块具体实现的封装，方便上层模块调用 etcd-raft 模块
 - 上层模块：etcd-raft 模块的调用者，上层模块通过 Node 提供的 API 与底层的 etcd-raft 模块交互
@@ -282,6 +286,15 @@ newLog() 完成节点 Entry 存储视图
 
 .image image/etcd-raft-role-switch-1.png
 
+##
+方法分析：
+- (r *raft) becomeFollower(term uint64, lead uint64)
+	- (r *raft) reset(term uint64) - 重置 raft 实例多个通用字段
+	- (r *raft) tickElection() - 选举超时处理
+- (r *raft) becomeCandidate()
+- (r *raft) becomePreCandidate()
+- (r *raft) becomeLeader()
+
 // TODO：节点角色切换具体实现
 ##
 3. 消息处理
@@ -291,14 +304,21 @@ raft 节点初始化 raft 实例后，当前节点角色为 Follower。假设新
 [详细流程图](https://raw.githubusercontent.com/Bevisy/etcd-code-analysis/main/image/etcd-raft-message-type-1.png)
 
 ##
-Leader 节点转移
+Leader 节点转移  
 一般我们指定一个特定的节点作为下一个任期的 Leader 节点，当前 Leader 节点会选择一个合适的节点，然后发送 MsgTransferLeader 消息（本地消息）
 
 [详细流程图](https://raw.githubusercontent.com/Bevisy/etcd-code-analysis/main/image/etcd-raft-message-type-1.png)
 
 ## node 接口及其实现
 
-TODO
+在 etcd-raft 模块中，结构体 Node 表示集群中的一个节点，它是在结构体 raft 之上的一层封装，对外提供相对简单的 API 接口
+
+- Node interface
+- Ready struct - 
+- node struct - Node interface 的实现
+- StartNode() - 初始化节点和 raft 实例
+- node.run() - 处理通道消息，node 的核心
+- newReady() - 读取底层 raft 实例中的各项数据及相关状态，并最终封装成 Ready 实例，该 Ready 实例最终会返回给上层模块
 
 ## raftExample
 

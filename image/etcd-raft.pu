@@ -352,7 +352,7 @@ n2 ->n1: MsgReadIndex
 note left: 请求转发到 Leader
 
 ' Candidate
-c1 ->n2: MsgProp
+c1 ->n2: MsgReadIndex
 note left: 客户端写入请求
 
 n2 ->n2: r.Step(m pb.Message)
