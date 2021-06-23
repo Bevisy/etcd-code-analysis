@@ -335,7 +335,7 @@ note left: 客户端写入请求
 n2 ->n2: r.Step(m pb.Message)
 note left: 假设请求到 Candidate 节点处理 MsgProp
 
-n2 ->n2: stepFollower(r *raft, m pb.Message)
+n2 ->n2: stepCandidate(r *raft, m pb.Message)
 note left: 直接丢弃
 
 
