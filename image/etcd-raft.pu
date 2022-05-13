@@ -1,4 +1,4 @@
-@startuml
+@startuml etcd-raft-flow-chart-1
 ' !theme materia-outline
 
 title etcd-raft-flow-chart-1
@@ -31,7 +31,7 @@ end
 @enduml
 
 
-@startuml
+@startuml etcd-raft-message-type-1
 ' !theme materia-outline
 
 title etcd-raft-message-type-1
